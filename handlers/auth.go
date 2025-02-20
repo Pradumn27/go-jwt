@@ -2,12 +2,15 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"go-jwt/config"
 	"go-jwt/models"
 	"go-jwt/utils"
+	"os"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/golang-jwt/jwt/v5"
 	"go.mongodb.org/mongo-driver/bson"
 )
 
@@ -17,7 +20,10 @@ func SignUp(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid input"})
 	}
 
-	hashedPassword, _ := utils.HashPassword(user.Password)
+	hashedPassword, hashingErr := utils.HashPassword(user.Password)
+	if hashingErr != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Password hashing failed"})
+	}
 	user.Password = hashedPassword
 
 	_, err := config.DB.Collection("users").InsertOne(context.Background(), user)
@@ -48,7 +54,11 @@ func SignUp(c *fiber.Ctx) error {
 func SignIn(c *fiber.Ctx) error {
 	var user models.User
 	input := new(models.User)
-	_ = c.BodyParser(input)
+	
+	parsingErr := c.BodyParser(input)
+	if parsingErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid input"})
+	}
 
 	err := config.DB.Collection("users").FindOne(context.Background(), bson.M{"email": input.Email}).Decode(&user)
 	if err != nil {
@@ -81,5 +91,67 @@ func SignIn(c *fiber.Ctx) error {
 }
 
 func RefreshToken(c *fiber.Ctx) error {
-	return c.JSON(fiber.Map{"message": "Token Refresh successful"})
+	refreshToken := c.Cookies("refresh_token")
+	if refreshToken == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "No refresh token provided"})
+	}
+
+	// Parsing token with correct claims struct
+	token, err := jwt.ParseWithClaims(refreshToken, &jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
+		secret := os.Getenv("JWT_SECRET")
+		if secret == "" {
+			return nil, errors.New("JWT_SECRET is not set")
+		}
+		return []byte(secret), nil
+	})
+	if err != nil || !token.Valid {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid refresh token"})
+	}
+
+	// Extracting claims
+	claims, ok := token.Claims.(*jwt.MapClaims)
+	if !ok || claims == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid token claims"})
+	}
+
+	// Checking if token is expired
+	exp, ok := (*claims)["exp"].(float64)
+	if !ok || time.Now().Unix() > int64(exp) {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Refresh token expired"})
+	}
+
+	// Extracting user ID safely
+	userID, ok := (*claims)["user_id"].(string)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid user ID in token"})
+	}
+
+	// Generating new access token
+	newAccessToken, _ := utils.GenerateToken(userID, time.Minute*15)
+
+	// Setting the new access token in the response cookie
+	c.Cookie(&fiber.Cookie{
+		Name:     "access_token",
+		Value:    newAccessToken,
+		Expires:  time.Now().Add(time.Minute * 15),
+		HTTPOnly: true,
+	})
+
+	return c.JSON(fiber.Map{"message": "Token refreshed"})
+}
+
+func Logout(c *fiber.Ctx) error {
+	c.Cookie(&fiber.Cookie{
+		Name:     "access_token",
+		Value:    "",
+		Expires:  time.Now().Add(-time.Hour),
+		HTTPOnly: true,
+	})
+	c.Cookie(&fiber.Cookie{
+		Name:     "refresh_token",
+		Value:    "",
+		Expires:  time.Now().Add(-time.Hour),
+		HTTPOnly: true,
+	})
+	return c.JSON(fiber.Map{"message": "Tokens revoked"})
 }
