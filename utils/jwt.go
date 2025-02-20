@@ -28,37 +28,3 @@ func IsTokenRevoked(jti string) (bool, error) {
 	err := config.DB.Collection("token_blacklist").FindOne(context.TODO(), bson.M{"jti": jti}).Decode(&result)
 	return err == nil, err
 }
-
-/*
-
-	SignUp: 
-	curl -X POST http://localhost:3000/auth/signup \
-     -H "Content-Type: application/json" \
-     -d '{
-           "email": "user@example.com",
-           "password": "securepassword"
-         }' \
-
-	SignIn: 
-	curl -X POST http://localhost:3000/auth/signin \
-     -H "Content-Type: application/json" \
-     -d '{
-           "email": "user@example.com",
-           "password": "securepassword"
-         }' \
-
-	Refresh: 
-	curl -X GET http://localhost:3000/auth/refresh \
-     -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NDAwNTgwNzQsImp0aSI6IjY3YjcyNmQyMmVkMDcyYWZjNWRiMjQyMyIsInVzZXJfaWQiOiI2N2I3MjY5ZTJlZDA3MmFmYzVkYjI0MjIifQ.jT4IXbyGcZPPZUS_zjc0_M1jlwHrFCFIHiLjQbhxoU0"
-
-
-	 UserDetails
-	 curl -X GET http://localhost:3000/user/details \
-	    -H "Content-Type: application/json"  \
-		-H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NDAwNTgwNzQsImp0aSI6IjY3YjcyNmQyMmVkMDcyYWZjNWRiMjQyMyIsInVzZXJfaWQiOiI2N2I3MjY5ZTJlZDA3MmFmYzVkYjI0MjIifQ.jT4IXbyGcZPPZUS_zjc0_M1jlwHrFCFIHiLjQbhxoU0"
-
-	RevokeToken: 
-	curl -X POST http://localhost:3000/auth/revoke \
-     	-H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NDAwNTgwNzQsImp0aSI6IjY3YjcyNmQyMmVkMDcyYWZjNWRiMjQyMyIsInVzZXJfaWQiOiI2N2I3MjY5ZTJlZDA3MmFmYzVkYjI0MjIifQ.jT4IXbyGcZPPZUS_zjc0_M1jlwHrFCFIHiLjQbhxoU0"
-
-*/
