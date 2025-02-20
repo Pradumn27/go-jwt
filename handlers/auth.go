@@ -2,17 +2,19 @@ package handlers
 
 import (
 	"context"
-	"errors"
 	"go-jwt/config"
 	"go-jwt/models"
 	"go-jwt/utils"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"go.mongodb.org/mongo-driver/bson"
 )
+
+var jwtSecret = []byte(os.Getenv("JWT_SECRET"))
 
 func SignUp(c *fiber.Ctx) error {
 	user := new(models.User)
@@ -30,23 +32,6 @@ func SignUp(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "User creation failed"})
 	}
-
-	accessToken, _ := utils.GenerateToken(user.ID.String(), time.Minute*15)
-	refreshToken, _ := utils.GenerateToken(user.ID.String(), time.Hour*24*7)
-
-	c.Cookie(&fiber.Cookie{
-		Name:     "access_token",
-		Value:    accessToken,
-		Expires:  time.Now().Add(time.Minute * 15),
-		HTTPOnly: true,
-	})
-
-	c.Cookie(&fiber.Cookie{
-		Name:     "refresh_token",
-		Value:    refreshToken,
-		Expires:  time.Now().Add(time.Hour * 24 * 7),
-		HTTPOnly: true,
-	})
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"message": "User created"})
 }
@@ -69,89 +54,109 @@ func SignIn(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid credentials"})
 	}
 
-	accessToken, _ := utils.GenerateToken(user.ID.String(), time.Minute*15)
-	refreshToken, _ := utils.GenerateToken(user.ID.String(), time.Hour*24*7)
-
-	c.Cookie(&fiber.Cookie{
-		Name:     "access_token",
-		Value:    accessToken,
-		Expires:  time.Now().Add(time.Minute * 15),
-		HTTPOnly: true,
-	})
-
-	c.Cookie(&fiber.Cookie{
-		Name:     "refresh_token",
-		Value:    refreshToken,
-		Expires:  time.Now().Add(time.Hour * 24 * 7),
-		HTTPOnly: true,
-	})
-
-
-	return c.JSON(fiber.Map{"message": "Login successful"})
+	token, _ := utils.GenerateToken(user.ID.Hex())
+	return c.JSON(fiber.Map{"token": token})
 }
 
 func RefreshToken(c *fiber.Ctx) error {
-	refreshToken := c.Cookies("refresh_token")
-	if refreshToken == "" {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "No refresh token provided"})
+	authHeader := c.Get("Authorization")
+	if authHeader == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Missing authorization header"})
 	}
 
-	// Parsing token with correct claims struct
-	token, err := jwt.ParseWithClaims(refreshToken, &jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
-		secret := os.Getenv("JWT_SECRET")
-		if secret == "" {
-			return nil, errors.New("JWT_SECRET is not set")
+	tokenParts := strings.Split(authHeader, " ")
+	if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid token format"})
+	}
+
+	tokenString := tokenParts[1]
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fiber.NewError(fiber.StatusUnauthorized, "Invalid signing method")
 		}
-		return []byte(secret), nil
+		return jwtSecret, nil
 	})
+
 	if err != nil || !token.Valid {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid refresh token"})
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid or expired token"})
 	}
 
-	// Extracting claims
-	claims, ok := token.Claims.(*jwt.MapClaims)
-	if !ok || claims == nil {
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid token claims"})
 	}
 
-	// Checking if token is expired
-	exp, ok := (*claims)["exp"].(float64)
-	if !ok || time.Now().Unix() > int64(exp) {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Refresh token expired"})
+	jti, _ := claims["jti"].(string)
+	exp, _ := claims["exp"].(float64)
+
+	revoked, _ := utils.IsTokenRevoked(jti)
+	if revoked {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Token has been revoked"})
 	}
 
-	// Extracting user ID safely
-	userID, ok := (*claims)["user_id"].(string)
-	if !ok {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid user ID in token"})
+	userID, exists := claims["user_id"].(string)
+	if !exists {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid token payload"})
 	}
 
-	// Generating new access token
-	newAccessToken, _ := utils.GenerateToken(userID, time.Minute*15)
-
-	// Setting the new access token in the response cookie
-	c.Cookie(&fiber.Cookie{
-		Name:     "access_token",
-		Value:    newAccessToken,
-		Expires:  time.Now().Add(time.Minute * 15),
-		HTTPOnly: true,
+	// Revoke the previous token
+	_, err = config.DB.Collection("token_blacklist").InsertOne(context.TODO(), models.BlacklistedToken{
+		JTI:       jti,
+		ExpiresAt: time.Unix(int64(exp), 0),
 	})
 
-	return c.JSON(fiber.Map{"message": "Token refreshed"})
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to revoke previous token"})
+	}
+
+	newToken, err := utils.GenerateToken(userID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Could not generate token"})
+	}
+
+	return c.JSON(fiber.Map{"token": newToken})
 }
 
-func Logout(c *fiber.Ctx) error {
-	c.Cookie(&fiber.Cookie{
-		Name:     "access_token",
-		Value:    "",
-		Expires:  time.Now().Add(-time.Hour),
-		HTTPOnly: true,
+func RevokeToken(c *fiber.Ctx) error {
+	authHeader := c.Get("Authorization")
+	if authHeader == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Missing authorization header"})
+	}
+
+	tokenParts := strings.Split(authHeader, " ")
+	if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid token format"})
+	}
+
+	tokenString := tokenParts[1]
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fiber.NewError(fiber.StatusUnauthorized, "Invalid signing method")
+		}
+		return jwtSecret, nil
 	})
-	c.Cookie(&fiber.Cookie{
-		Name:     "refresh_token",
-		Value:    "",
-		Expires:  time.Now().Add(-time.Hour),
-		HTTPOnly: true,
+
+	if err != nil || !token.Valid {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid or expired token"})
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid token claims"})
+	}
+
+	jti, _ := claims["jti"].(string)
+	exp, _ := claims["exp"].(float64)
+
+	// Store the JTI in the blacklist collection
+	_, err = config.DB.Collection("token_blacklist").InsertOne(context.TODO(), models.BlacklistedToken{
+		JTI:       jti,
+		ExpiresAt: time.Unix(int64(exp), 0),
 	})
-	return c.JSON(fiber.Map{"message": "Tokens revoked"})
+
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to revoke token"})
+	}
+
+	return c.JSON(fiber.Map{"message": "Token revoked successfully"})
 }
